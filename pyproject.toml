@@ -1,0 +1,27 @@
+[project]
+name = "catastro-mcp-server"
+version = "0.1.0"
+description = "Servidor MCP personalizado para Catastro"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.14.4",
+    "mcp[cli]>=1.26.0",
+]
+
+authors = [
+    {name = "Carlos Galisteo", email = "cgalisteoortega@gmail.com"}
+]    
+
+[project.scripts]
+catastro_mcp_server = "mcpserver.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
