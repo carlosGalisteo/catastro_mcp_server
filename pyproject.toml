@@ -1,5 +1,5 @@
 [project]
-name = "catastro-mcp-server"
+name = "catastro_mcp_server"
 version = "0.1.0"
 description = "Servidor MCP personalizado para Catastro"
 readme = "README.md"
