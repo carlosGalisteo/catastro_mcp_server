@@ -116,7 +116,7 @@ Añade este bloque a tu `claude_desktop_config.json`:
       "command": "uvx",
       "args": [
         "--from",
-        " + https://github.com/carlosGalisteo/catastro_mcp_server.git@main",
+        " git + https://github.com/carlosGalisteo/catastro_mcp_server.git@main",
         "catastro_mcp_server"
       ]
     }
