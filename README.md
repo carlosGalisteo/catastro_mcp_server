@@ -113,12 +113,12 @@ Añade este bloque a tu `claude_desktop_config.json`:
 {
   "mcpServers": {
     "Catastro": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        " git + https://github.com/carlosGalisteo/catastro_mcp_server.git@main",
-        "catastro_mcp_server"
-      ]
+        "command": "C:\\Users\\Carlos\\.local\\bin\\uvx.exe",
+        "args": [
+            "--from",
+            "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.0.zip",
+            "catastro_mcp_server"
+        ]
     }
   }
 }
