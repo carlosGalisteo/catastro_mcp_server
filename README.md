@@ -1,4 +1,4 @@
-# catastro-mcp-server
+# catastro_mcp_server
 ## Descripción general
 Servidor MCP (Model Context Protocol) en Python que expone herramientas para consultar servicios oficiales del Catastro de España y obtener información catastral no protegida de forma estructurada.
 
@@ -92,7 +92,7 @@ El servidor ofrece las siguientes herramientas:
     - <small>Lista los FeatureTypes disponibles en el WFS INSPIRE de Parcelas del Catastro,
         extrayendo name/title y CRS soportados desde GetCapabilities.</small>
     - <small>Input:</small>
-        - - <small>version (str): versión WFS (por defecto 2.0.0)</small>
+        - <small>version (str): versión WFS (por defecto 2.0.0)</small>
 - `wfs_cp_describe_feature_type_resolved`
     - <small>Obtiene el XSD de DescribeFeatureType y resuelve includes/imports (schemaLocation)
         para poder extraer los campos reales del esquema INSPIRE (p.ej. inspireId, localId, etc.).</small>
@@ -106,29 +106,82 @@ El servidor ofrece las siguientes herramientas:
         - <small>refcat (str): RC (14/18/20). Se usa la base de 14.</small>
         - <small>srs (str): CRS de salida. Recomendado "EPSG::25830" o "EPSG::4326".</small>
 
+- `parcela_geojson_por_rc`
+    - <small>Devuelve GeoJSON (FeatureCollection) de una parcela por RC.
+        - GeoJSON siempre en lon/lat WGS84 (estándar GeoJSON).
+        - Para evitar dependencias de reproyección (pyproj) y problemas de CRS en StoredQuery,
+          fuerza la petición del GML en EPSG:4326 y realiza swap a lon/lat en la conversión.</small>
+    - <small>Input:</small>
+        - <small>refcat (str): RC (14/18/20). Se usa la base de 14.</small>
+        - <small>srs (str): se mantiene por compatibilidad, pero esta tool fuerza EPSG:4326 internamente.</small>
+
+## Requisitos
+- Tener instalado `uv` (incluye `uvx`).
+- Para usar MCP Inspector: tener instalado Node.js (incluye `npx`).
+- Un cliente MCP (por ejemplo Claude Desktop) para consumir las herramientas.
+
 ## Uso con Claude Desktop
-Añade este bloque a tu `claude_desktop_config.json`:
+Añade el servidor dentro de `mcpServers` en tu `claude_desktop_config.json`.
+
+> Nota: si ya tienes otros MCP servers configurados, **no sustituyas** tu archivo completo.
+> Añade únicamente el bloque `"Catastro": { ... }` dentro de `mcpServers`.
+
+### Opción A (recomendada): `uvx` en PATH
+Si `uv/uvx` está en el PATH del sistema, usa:
 
 ```json
-{
-  "mcpServers": {
-    "Catastro": {
-        "command": "C:\\Users\\Carlos\\.local\\bin\\uvx.exe",
-        "args": [
-            "--from",
-            "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.0.zip",
-            "catastro_mcp_server"
-        ]
-    }
-  }
+"Catastro": {
+  "command": "uvx",
+  "args": [
+    "--from",
+    "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.0.zip",
+    "catastro_mcp_server"
+  ]
 }
 ```
+### Opción B (Windows): ruta absoluta a `uvx.exe`
+Si Claude no encuentra `uvx`, obtén la ruta con where uvx y úsala como command:
+```json
+"Catastro": {
+  "command": "C:\\Users\\TU_USUARIO\\.local\\bin\\uvx.exe",
+  "args": [
+    "--from",
+    "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.0.zip",
+    "catastro_mcp_server"
+  ]
+}
+```
+## Prueba rápida (prompts de ejemplo)
+Una vez activo el servidor en Claude Desktop, prueba con estas consultas:
+
+1) **Listar provincias**
+- “Usa la herramienta `obtener_provincias` y muéstrame el resultado.”
+
+2) **Buscar municipios por filtro**
+- “Usa `obtener_municipios` para la provincia `Santa Cruz de Tenerife` y filtra por `Laguna`.”
+
+3) **Obtener información por localización**
+- “Usa `dcnp_por_direccion` para el municipio de `Madrid` y por `calle Alcala, 48`.”
+
+4) **Obtener GeoJSON de una parcela por RC**
+- “Usa `parcela_geojson_por_rc` con `refcat = 1146801VK4714E` y devuélveme el GeoJSON.”
+
 ## Test con MCP Inspector
-Ejecuta en la consola desde la raíz del repositorio:
+Ejecuta en una consola (no es necesario clonar el repositorio; puedes hacerlo desde cualquier carpeta):
 
 ```bash
-fastmcp dev src/mcpserver/mcp_catastro.py
+npx -y @modelcontextprotocol/inspector uvx --from "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.0.zip" catastro_mcp_server
 ```
+## Solución de problemas (Troubleshooting)
+- **No aparecen las herramientas en Claude Desktop**
+  - Revisa **Ver registros** del servidor Catastro en Claude.
+  - Asegúrate de que `uvx` funciona en tu terminal: `uvx --version`.
+  - Si `command: "uvx"` falla en Windows, usa la **Opción B** con ruta absoluta (`where uvx`).
+
+- **Errores HTTP / bloqueos (403/429) o respuestas lentas**
+  - Los servicios del Catastro son públicos pero pueden aplicar limitaciones.
+  - Espera y reintenta más tarde; evita lanzar muchas peticiones seguidas.
+
 ## Licencia
 Este servidor MCP está licenciado bajo la Licencia MIT. Esto significa que puedes usar, modificar y redistribuir el software, siempre que se cumplan los términos de dicha licencia. Para más detalles, consulta el archivo `LICENSE` incluido en el repositorio.
 
