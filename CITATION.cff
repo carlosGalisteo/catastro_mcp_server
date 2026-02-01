@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "Si usas este software, por favor cítalo usando la información de este archivo."
+type: software
+title: "catastro-mcp-server"
+version: "0.1.0"
+date-released: "2026-01-31"
+authors:
+  - family-names: "Galisteo"
+    given-names: "Carlos"
+repository-code: "https://github.com/carlosGalisteo/catastro_mcp_server"
+license: "MIT"
