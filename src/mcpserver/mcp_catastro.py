@@ -2,6 +2,7 @@
 from __future__ import annotations # Las anotaciones de tipo son strings por defecto y no se evaluan hasta tiempo de ejecución.
 
 import math # Operaciones matemáticas
+import os # Interacción con el sistema operativo
 import json # Manejo de JSON
 import re
 from fastmcp import FastMCP # Framework MCP
@@ -1373,7 +1374,146 @@ def parcela_geojson_por_rc(refcat: str, srs: str = "AUTO") -> dict:
         }
 
 
+# EXPORTACION ARCHIVOS --------------------
 
+# AUXILIARES (NO tools)
+# ---------------------------------------------------------------------
+
+# Carpeta raíz permitida para exportaciones 
+EXPORT_ROOT = r"C:\PROFESIONAL\Catastro"
+
+def _safe_export_path(filename: str, out_dir: str = EXPORT_ROOT) -> str:
+    """
+    Uso:
+        Construye una ruta segura dentro de EXPORT_ROOT/out_dir (sin permitir escapes con ..).
+    """
+    base = os.path.abspath(out_dir or EXPORT_ROOT)
+    root = os.path.abspath(EXPORT_ROOT)
+
+    # Restringimos SIEMPRE a EXPORT_ROOT (puedes relajarlo si quieres)
+    if not base.startswith(root + os.sep) and base != root:
+        raise ValueError(f"Directorio no permitido. Debe estar dentro de: {root}")
+
+    path = os.path.abspath(os.path.join(base, filename))
+    if not path.startswith(base + os.sep) and path != base:
+        raise ValueError("Ruta no permitida (path traversal).")
+    return path
+
+
+def _write_text(path: str, content: str, overwrite: bool = True) -> int:
+    """
+    Uso:
+        Escribe texto UTF-8 a disco y devuelve bytes escritos.
+    """
+    if (not overwrite) and os.path.exists(path):
+        raise FileExistsError(f"El archivo ya existe: {path}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(content)
+    return len(content.encode("utf-8"))
+
+# TOOL PRINCIPAL DE EXPORTACION GML + GEOJSON--------------------
+
+@mcp.tool()
+def exportar_parcela_gml_y_geojson(
+    refcat: str,
+    srs: str = "AUTO",
+    out_dir: str = EXPORT_ROOT,
+    basename: str = "",
+    overwrite: bool = True,
+) -> dict:
+    """
+    Uso:
+        Exporta GML + GeoJSON de una parcela en una sola llamada.
+        - GML: se pide con srs (AUTO o el que indiques)
+        - GeoJSON: siempre se entrega en lon/lat (WGS84). Si pyproj no está, fuerza GML en EPSG:4326.
+    Entradas:
+        refcat (str): RC (se usa base 14)
+        srs (str): "AUTO" o EPSG/URN para el GML
+        out_dir (str): carpeta destino (debe estar dentro de EXPORT_ROOT)
+        basename (str): nombre base sin extensión (si vacío usa ref14)
+        overwrite (bool): sobrescribir si existe
+    Salida:
+        dict: rutas y métricas de escritura
+    """
+    ref14 = (refcat or "").strip().upper()[:14]
+    if not ref14:
+        return {"ok": False, "note": "RC vacía"}
+
+    base = (basename or ref14).strip()
+    if not base:
+        base = ref14
+
+    # -------- 1) Obtener y guardar GML (SRS solicitado) --------
+    pack_gml = _parcela_gml_por_rc_impl(ref14, srs)
+    if not pack_gml.get("ok"):
+        return {"ok": False, "used_refcat": ref14, "note": pack_gml.get("note", "Error al obtener GML")}
+
+    gml_text = pack_gml.get("gml") or ""
+    if not gml_text:
+        return {"ok": False, "used_refcat": ref14, "note": "GML vacío"}
+
+    gml_path = _safe_export_path(f"{base}.gml", out_dir=out_dir)
+    gml_bytes = _write_text(gml_path, gml_text, overwrite=overwrite)
+
+    # -------- 2) GeoJSON (lon/lat) --------
+    # Intento A: convertir desde el mismo GML (si CRS proyectado, requiere pyproj)
+    geojson_from_same_gml_ok = True
+    try:
+        feature = _geojson_feature_from_gml(gml_text, ref14)
+    except Exception:
+        geojson_from_same_gml_ok = False
+        feature = None
+
+    # Intento B (fallback): si falla, pedir GML en EPSG:4326 y convertir (sin reproyección)
+    if not geojson_from_same_gml_ok:
+        pack_4326 = _parcela_gml_por_rc_impl(ref14, "EPSG:4326")
+        if not pack_4326.get("ok"):
+            return {
+                "ok": False,
+                "used_refcat": ref14,
+                "gml_path": gml_path,
+                "gml_bytes": gml_bytes,
+                "note": f"Guardé GML pero falló GeoJSON. Error al obtener GML 4326: {pack_4326.get('note')}",
+            }
+        gml_4326 = pack_4326.get("gml") or ""
+        if not gml_4326:
+            return {
+                "ok": False,
+                "used_refcat": ref14,
+                "gml_path": gml_path,
+                "gml_bytes": gml_bytes,
+                "note": "Guardé GML pero el GML 4326 vino vacío (GeoJSON imposible).",
+            }
+        feature = _geojson_feature_from_gml(gml_4326, ref14)
+
+    collection = {"type": "FeatureCollection", "features": [feature]}
+    if isinstance(feature, dict) and "bbox" in feature:
+        collection["bbox"] = feature["bbox"]
+
+    geojson_text = json.dumps(collection, ensure_ascii=False)
+    geojson_path = _safe_export_path(f"{base}.geojson", out_dir=out_dir)
+    geojson_bytes = _write_text(geojson_path, geojson_text, overwrite=overwrite)
+
+    return {
+        "ok": True,
+        "used_refcat": ref14,
+        "gml": {
+            "path": gml_path,
+            "bytes": gml_bytes,
+            "requested_srs": srs,
+            "resolved_srs": pack_gml.get("resolved_srs"),
+            "response_srsName": pack_gml.get("response_srsName"),
+        },
+        "geojson": {
+            "path": geojson_path,
+            "bytes": geojson_bytes,
+            "note": "GeoJSON siempre en lon/lat (WGS84).",
+            "converted_from_same_gml": geojson_from_same_gml_ok,
+            "pyproj_available": _HAS_PYPROJ,
+        },
+        "note": "Exportación completada desde el servidor MCP.",
+    }
 
 
     
