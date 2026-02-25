@@ -134,7 +134,7 @@ Si `uv/uvx` está en el PATH del sistema, usa:
   "command": "uvx",
   "args": [
     "--from",
-    "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.1.zip",
+    "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.2.zip",
     "catastro_mcp_server"
   ]
 }
@@ -146,7 +146,7 @@ Si Claude no encuentra `uvx`, obtén la ruta con where uvx y úsala como command
   "command": "C:\\Users\\TU_USUARIO\\.local\\bin\\uvx.exe",
   "args": [
     "--from",
-    "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.1.zip",
+    "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.2.zip",
     "catastro_mcp_server"
   ]
 }
