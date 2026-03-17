@@ -1,6 +1,6 @@
 [project]
 name = "catastro_mcp_server"
-version = "0.1.0"
+version = "0.1.2"
 description = "Servidor MCP personalizado para Catastro"
 readme = "README.md"
 requires-python = ">=3.10"
