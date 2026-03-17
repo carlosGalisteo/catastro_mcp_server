@@ -17,6 +17,13 @@ try:
 except Exception:
     _HAS_PYPROJ = False
 
+try:
+    import ifcopenshell
+    import ifcopenshell.guid
+    _HAS_IFCOPENSHELL = True
+except Exception:
+    _HAS_IFCOPENSHELL = False
+    
 
 # Endpoints JSON oficiales (WCF) e INSPIRE WFS
 BASE_COORD = "https://ovc.catastro.meh.es/OVCServWeb/OVCWcfCallejero/COVCCoordenadas.svc/json"
@@ -1515,5 +1522,704 @@ def exportar_parcela_gml_y_geojson(
         "note": "Exportación completada desde el servidor MCP.",
     }
 
+# EXPORTACION PARCELA IFC --------------------
+# AUXILIARES (NO tools)
+# ---------------------------------------------------------------------
+def _ifc_guid() -> str:
+    """
+    Uso:
+        Genera un GlobalId IFC comprimido y válido.
+    Salida:
+        str: identificador único IFC
+    """
+    return ifcopenshell.guid.new()  
 
+def _ring_without_closing_point(ring):
+    """
+    Uso:
+        Elimina el último punto si coincide con el primero
+        (cierre típico de polígonos GIS que en IFC no se repite).
+    Args:
+        ring (list[(x,y)]): lista de coordenadas del anillo
+    Salida:
+        list[(x,y)]: anillo sin punto de cierre repetido
+    """
+    if len(ring) > 1 and ring[0] == ring[-1]:
+        return ring[:-1]
+    return ring[:]
+
+def _local_origin_from_polygons(polygons):
+    """
+    Uso:
+        Obtiene un origen local a partir del primer punto
+        del primer anillo exterior del primer polígono.
+    Entradas:
+        polygons: estructura devuelta por _gml_extract_polygons
+                  [
+                    [
+                      [(x,y), ...],   # anillo exterior
+                      [(x,y), ...]    # anillo interior opcional
+                    ],
+                    ...
+                  ]
+    Salida:
+        tuple[float, float]: (x0, y0)
+    """
+    if not polygons or not polygons[0] or not polygons[0][0]:
+        raise ValueError("No hay geometría suficiente para calcular origen local.")
     
+    ring0 = _ring_without_closing_point(polygons[0][0])
+    if not ring0:
+        raise ValueError("El anillo exterior está vacío.")
+    
+    return ring0[0]  # primer punto del anillo exterior del primer polígono 
+
+def _shift_ring_to_local(ring, x0, y0, ndigits=6):
+    """
+    Uso:
+        Traslada un anillo a coordenadas locales cercanas al origen.
+    Entradas:
+        ring (list[(x,y)]): anillo original
+        x0 (float): coordenada X del origen local
+        y0 (float): coordenada Y del origen local
+        ndigits (int): número de decimales para redondeo
+    Salida:
+        list[(x,y)]: anillo en coordenadas locales
+    """
+    pts = _ring_without_closing_point(ring)
+    return [(round(x - x0, ndigits), round(y - y0, ndigits)) for (x, y) in pts]
+
+def _bbox_2d(rings):
+    """
+    Uso:
+        Calcula el bounding box 2D de uno o varios anillos.
+    Entradas:
+        rings (list[list[(x,y)]]): lista de anillos
+    Salida:
+        dict: {
+            "min_x": float,
+            "min_y": float,
+            "max_x": float,
+            "max_y": float
+        }
+    """
+    xs = []
+    ys = []
+    for ring in rings:
+        for (x, y) in ring:
+            xs.append(x)
+            ys.append(y)
+    if not xs or not ys:
+        return {"min_x": 0, "min_y": 0, "max_x": 0, "max_y": 0}
+        
+    return {"min_x": min(xs), "min_y": min(ys), "max_x": max(xs), "max_y": max(ys)}
+
+def _ring_area_and_perimeter(ring):
+    """
+    Uso:
+        Calcula el área y el perímetro de un anillo 2D.
+        El área se calcula con la fórmula del "shoelace".
+    Entradas:
+        ring (list[(x,y)]): anillo 2D
+    Salida:
+        dict: {
+            "area_m2": float,
+            "perimeter_m": float
+        }
+    """
+    pts = _ring_without_closing_point(ring)
+    if len(pts) < 3:
+        return {"area_m2": 0.0, "perimeter_m": 0.0}
+    
+    #Area con fórmula del "shoelace"
+    area2 = 0.0
+    for i in range(len(pts)):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % len(pts)]
+        area2 += (x1 * y2) - (x2 * y1)
+        
+    area = abs(area2) * 0.5
+    
+    #Perímetro sumando distancias entre puntos
+    perimeter = 0.0
+    for i in range(len(pts)):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % len(pts)]    
+        dx = x2 - x1
+        dy = y2 - y1
+        perimeter += math.hypot(dx, dy)
+    
+    return {"area_m2": area, "perimeter_m": perimeter}
+
+def _write_ifc(path: str, ifc_file, overwrite: bool = True) -> int:
+    """
+    Uso:
+        Escribe un archivo IFC a disco y devuelve su tamaño en bytes.
+    Entradas:
+        path (str): ruta destino
+        ifc_file: archivo IFC en memoria
+        overwrite (bool): sobrescribir si existe
+    Salida:
+        int: tamaño del archivo escrito en bytes
+    """
+    if (not overwrite) and os.path.exists(path):
+        raise FileExistsError(f"El archivo ya existe: {path}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    ifc_file.write(path)
+    return os.path.getsize(path)
+
+def _build_ifc_parcel_surface_model_base(epsg_code, map_eastings, map_northings, ref14):
+    """
+    Uso:
+        Crea la base de un modelo IFC4 con:
+        - unidades
+        - contexto geométrico
+        - georreferenciación
+        - IfcProject
+        - IfcSite
+    Entradas:
+        epsg_code (int | None): código EPSG del CRS proyectado
+        map_eastings (float): coordenada X real del origen local
+        map_northings (float): coordenada Y real del origen local
+        ref14 (str): referencia catastral base 14
+    Salida:
+        tuple: (ifc_file, model_context, project, site)
+    """
+    
+    if not _HAS_IFCOPENSHELL:
+        raise RuntimeError("ifcopenshell no disponible: no puedo crear modelo IFC")
+    
+    f = ifcopenshell.file(schema="IFC4")
+    
+    # -------------------------
+    # UNIDADES
+    # -------------------------
+    unit_length = f.create_entity("IfcSIUnit", None, "LENGTHUNIT", None, "METRE")
+    unit_area = f.create_entity("IfcSIUnit", None, "AREAUNIT", None, "SQUARE_METRE")
+    unit_volume = f.create_entity("IfcSIUnit", None, "VOLUMEUNIT", None, "CUBIC_METRE")
+    units = f.create_entity("IfcUnitAssignment", [unit_length, unit_area, unit_volume]) # asignación de unidades al modelo
+
+    # -------------------------
+    # SISTEMA DE COORDENADAS
+    # -------------------------
+    origin = f.create_entity("IfcCartesianPoint", (0.0, 0.0, 0.0))
+    axis_z = f.create_entity("IfcDirection", (0.0, 0.0, 1.0))  # eje Z hacia arriba
+    axis_x = f.create_entity("IfcDirection", (1.0, 0.0, 0.0))  # eje X hacia el este
+    world_cs = f.create_entity("IfcAxis2Placement3D", origin, axis_z, axis_x)  # sistema de coordenadas global
+    model_context = f.create_entity("IfcGeometricRepresentationContext", None, "Model", 3, 1.0e-5, world_cs, None)  # contexto de representación geométrica para el modelo
+    
+    # -------------------------
+    # GEOREFERENCIACION
+    # -------------------------
+    projected_crs_name = f"EPSG:{epsg_code}" if epsg_code else "unknown"
+    
+    projected_crs = f.create_entity(
+        "IfcProjectedCRS",
+        projected_crs_name, # name
+        None,              # description
+        None,              # geodeticDatum
+        None,              # verticalDatum
+        None,              # mapProjection
+        None,              # mapZone,  # opcional, se puede inferir del EPSG 
+        unit_length,       # mapUnit     
+    )
+    
+    map_conversion = f.create_entity(
+        "IfcMapConversion",
+        model_context,       # context
+        projected_crs,      # TargetCRS
+        float(map_eastings),  # Eastings
+        float(map_northings), # Northings
+        0.0,                # OrthogonalHeight
+        1.0,                # XAxisAbscissa
+        0.0,                # XAxisOrdinate
+        1.0,                # Scale      
+        
+    )
+    
+    # -------------------------
+    # PROYECTO
+    # -------------------------
+    
+    project = f.create_entity(
+        "IfcProject",
+        _ifc_guid(), # GlobalId único
+        None, # OwnerHistory (opcional, se puede omitir)
+        f"Parcela catastral {ref14}", # Name
+        None, # Description
+        None, # ObjectType
+        None, # LongName
+        None, # Phase
+        [model_context], #RepresentationContexts   
+        units, # UnitsInContext
+    )      
+    
+    # -------------------------
+    # SITE
+    # -------------------------
+    placement_site = f.create_entity("IfcLocalPlacement", None, world_cs)  # ubicación del sitio en el sistema de coordenadas global
+    site = f.create_entity(
+    "IfcSite",
+    GlobalId=_ifc_guid(),
+    OwnerHistory=None,
+    Name=f"Site {ref14}",
+    Description=None,
+    ObjectType=None,
+    ObjectPlacement=placement_site,
+    Representation=None,
+    LongName=None,
+    CompositionType="ELEMENT",
+    RefLatitude=None,
+    RefLongitude=None,
+    RefElevation=None,
+    LandTitleNumber=None,
+    SiteAddress=None,
+    )
+    
+    f.create_entity("IfcRelAggregates", _ifc_guid(), None, "Project decomposition", None, project, [site])  # relaciona el proyecto con el sitio
+
+    return f, model_context, project, site
+
+def _local_exterior_rings_from_polygons(polygons, x0, y0):
+    """
+    Uso:
+        Extrae los anillos exteriores de los polígonos y los transforma
+        a coordenadas locales.
+    Entradas:
+        polygons: estructura devuelta por _gml_extract_polygons
+        x0 (float): coordenada X del origen local
+        y0 (float): coordenada Y del origen local
+    Salida:
+        list[list[(x,y)]]: lista de anillos exteriores en local
+    """
+    local_rings = []
+    for poly in polygons:
+        if not poly:
+            continue
+        exterior = poly[0]  # el primer anillo es el exterior
+        exterior_local = _shift_ring_to_local(exterior, x0, y0)
+        
+        if len(exterior_local) >= 3:
+            local_rings.append(exterior_local)
+        
+    return local_rings   
+
+def _polygonal_face_set_data_from_rings(local_rings):
+    """
+    Uso:
+        Convierte anillos locales 2D en datos aptos para construir
+        un IfcPolygonalFaceSet:
+        - lista de puntos 3D
+        - lista de caras indexadas
+    Entradas:
+        local_rings (list[list[(x,y)]]): anillos exteriores en local
+    Salida:
+        tuple:
+            coords_3d (list[(x,y,z)])
+            faces_indices (list[list[int]])
+    """
+    coords_3d = []
+    faces_indices = []
+    point_cursor = 1  # IFC indexa puntos desde 1
+    
+    for rings in local_rings:
+        if len(rings) < 3:
+            continue
+        start = point_cursor
+        for x, y in rings:
+            coords_3d.append((x, y, 0.0))  # Z=0 para parcela plana
+            point_cursor += 1
+        
+        indices = list(range(start, point_cursor))
+        faces_indices.append(indices)
+        
+    return coords_3d, faces_indices
+    
+def _build_parcel_shape_from_face_set(f, model_context, coords_3d, faces_indices):
+    """
+    Uso:
+        Construye la representación geométrica IFC de la parcela
+        a partir de puntos 3D y caras indexadas.
+    Entradas:
+        f: archivo ifcopenshell.file
+        model_context: IfcGeometricRepresentationContext del modelo
+        coords_3d (list[(x,y,z)]): puntos 3D
+        faces_indices (list[list[int]]): índices de caras (base 1)
+    Salida:
+        IfcProductDefinitionShape: shape de la parcela
+    """
+    if not coords_3d:
+        raise ValueError("No hay coordenadas para construir la forma de la parcela.")
+    if not faces_indices:
+        raise ValueError("No hay caras para construir la forma de la parcela.")
+    
+    faces = []
+    for indices in faces_indices:
+        if len(indices) < 3:
+            continue
+        face = f.create_entity("IfcIndexedPolygonalFace", indices)
+        faces.append(face)
+    if not faces:
+        raise ValueError("No se pudieron crear caras válidas para la parcela.")
+    
+    point_list = f.create_entity("IfcCartesianPointList3D", coords_3d)
+    polygonal_face_set = f.create_entity(
+        "IfcPolygonalFaceSet",
+        Coordinates=point_list,
+        Closed=False,
+        Faces=faces,
+        PnIndex=None,
+    )
+    shape_rep = f.create_entity(
+        "IfcShapeRepresentation",
+        model_context, # Context
+        "Body", # RepresentationIdentifier
+        "Tessellation", # RepresentationType
+        [polygonal_face_set], # Items
+    )
+    product_shape = f.create_entity(
+        "IfcProductDefinitionShape",
+        None, # Name
+        None, # Description
+        [shape_rep], # Representations
+    )
+    
+    return product_shape
+
+def _create_parcel_element(f, site, shape, name = "Parcela catastral", description = "Parcela obtenida desde catastro"):
+    """
+    Uso:
+        Crea el elemento IFC que representa la parcela y le asigna
+        su geometría.
+    Entradas:
+        f: archivo ifcopenshell.file
+        site: IfcSite del modelo
+        shape: IfcProductDefinitionShape con la geometría
+        name (str): nombre del elemento
+        description (str): descripción
+    Salida:
+        IfcGeographicElement
+    """
+    placement = f.create_entity(
+        "IfcLocalPlacement",
+        site.ObjectPlacement, # ubicación relativa al sitio
+        f.create_entity(
+            "IfcAxis2Placement3D",
+            f.create_entity("IfcCartesianPoint", (0.0, 0.0, 0.0)), # origen local
+            None, 
+            None
+        )
+    )
+    
+    parcel = f.create_entity(
+        "IfcGeographicElement",
+        ifcopenshell.guid.new(), # GlobalId único
+        None, # OwnerHistory (opcional)
+        name, # Name
+        description, # Description
+        None, # ObjectType
+        placement, # ObjectPlacement
+        shape, # Representation
+        None, # LongName
+    )
+    
+    return parcel
+
+def _contain_parcel_in_site(f, site, parcel):
+    """
+    Uso:
+        Crea la relación espacial que contiene la parcela dentro del IfcSite.
+    Entradas:
+        f: archivo ifcopenshell.file
+        parcel: IfcGeographicElement de la parcela
+        site: IfcSite del modelo
+    Salida:
+        IfcRelContainedInSpatialStructure
+    """
+    return f.create_entity(
+        "IfcRelContainedInSpatialStructure",
+        _ifc_guid(), # GlobalId único
+        None, # OwnerHistory (opcional)
+        "Site contains parcel", # Name
+        None, # Description
+        [parcel], # RelatedElements (la parcela es contenida por el sitio)
+        site # RelatingStructure (el sitio es el contenedor)
+    )
+    
+def _attach_parcel_quantities(f, parcel, area_m2, perimeter_m):
+    """
+    Uso:
+        Asocia al elemento parcela un conjunto de cantidades IFC
+        con el área y el perímetro.
+    Entradas:
+        f: archivo ifcopenshell.file
+        parcel: IfcGeographicElement de la parcela
+        area_m2 (float): área de la parcela en m²
+        perimeter_m (float): perímetro de la parcela en m
+    Salida:
+        IfcElementQuantity
+    """
+    q_area = f.create_entity(
+        "IfcQuantityArea",
+        "GrossArea", # Name
+        "Gross area of the parcel", # Description
+        None, # Unit
+        float(area_m2), # AreaValue
+        None, # Formula
+    )
+    
+    q_perimeter = f.create_entity(
+        "IfcQuantityLength",
+        "Perimeter", # Name
+        "Perimeter length of the parcel", # Description
+        None, # Unit
+        float(perimeter_m), # LengthValue
+        None, # Formula
+    )
+    
+    quatity_set = f.create_entity(
+        "IfcElementQuantity",
+        _ifc_guid(), # GlobalId único
+        None, # OwnerHistory (opcional)
+        "BaseQuantities", # Name
+        None, # Description
+        None, # MethodOfMeasurement
+        [q_area, q_perimeter] # Quantities
+    )
+    
+    f.create_entity(
+        "IfcRelDefinesByProperties",
+        _ifc_guid(), # GlobalId único
+        None, # OwnerHistory (opcional)
+        None, # Name
+        None, # Description
+        [parcel], # RelatedObjects (la parcela a la que se asignan las cantidades)
+        quatity_set # RelatingPropertyDefinition (el conjunto de cantidades)
+    )
+    
+    return quatity_set   
+    
+
+def _build_ifc_parcel_surface_model(polygons, ref14, epsg_code, map_eastings, map_northings):
+    """
+    Uso:
+        Construye un modelo IFC4 mínimo con una parcela como superficie
+        plana cerrada y georreferenciada.
+    Entradas:
+        polygons: estructura devuelta por _gml_extract_polygons
+        ref14 (str): referencia catastral base 14
+        epsg_code (int | None): código EPSG del CRS proyectado
+        map_eastings (float): coordenada X real del origen local
+        map_northings (float): coordenada Y real del origen local
+    Salida:
+        tuple:
+            ifc_file
+            metadata (dict)
+    """
+
+    f, model_context, project, site = _build_ifc_parcel_surface_model_base(
+        epsg_code=epsg_code,
+        map_eastings=map_eastings,
+        map_northings=map_northings,
+        ref14=ref14,
+    )
+
+    local_rings = _local_exterior_rings_from_polygons(
+        polygons=polygons,
+        x0=map_eastings,
+        y0=map_northings,
+    )
+
+    if not local_rings:
+        raise ValueError("No hay anillos exteriores válidos para generar la parcela IFC.")
+
+    coords_3d, faces_indices = _polygonal_face_set_data_from_rings(local_rings)
+
+    shape = _build_parcel_shape_from_face_set(
+        f=f,
+        model_context=model_context,
+        coords_3d=coords_3d,
+        faces_indices=faces_indices,
+    )
+
+    parcel = _create_parcel_element(
+        f=f,
+        site=site,
+        shape=shape,
+        name=f"Parcela {ref14}",
+        description="Parcela catastral exportada desde MCP Catastro",
+    )
+    
+    parcel_metrics = _ring_area_and_perimeter(local_rings[0]) if local_rings else {"area_m2": 0.0, "perimeter_m": 0.0}
+    
+    _attach_parcel_quantities(
+        f,
+        parcel,
+        parcel_metrics["area_m2"],
+        parcel_metrics["perimeter_m"]
+    )
+
+    _contain_parcel_in_site(
+        f=f,
+        parcel=parcel,
+        site=site,
+    )
+
+    bbox = _bbox_2d(local_rings)
+    
+    
+
+    metadata = {
+        "refcat": ref14,
+        "epsg": epsg_code,
+        "rings": len(local_rings),
+        "points": len(coords_3d),
+        "faces": len(faces_indices),
+        "map_origin": {
+            "eastings": round(map_eastings, 6),
+            "northings": round(map_northings, 6),
+            "orthogonal_height": 0.0,
+        },
+        "local_bbox": {k: round(v, 6) for k, v in bbox.items()},
+        "area_m2": round(parcel_metrics.get("area_m2", 0.0), 3),
+        "perimeter_m": round(parcel_metrics.get("perimeter_m", 0.0), 3),
+    }
+
+    return f, metadata
+
+
+# TOOL PRINCIPAL DE EXPORTACION IFC--------------------
+
+@mcp.tool()
+def exportar_parcela_ifc(
+    refcat: str,
+    srs: str = "AUTO",
+    out_dir: str = EXPORT_ROOT,
+    basename: str = "",
+    overwrite: bool = True,
+) -> dict:
+    """
+    Uso:
+        Exporta una parcela catastral a IFC4 como superficie plana cerrada.
+        El IFC generado incluye una estructura mínima válida para uso en
+        entornos BIM como Bonsai:
+            - IfcProject
+            - IfcSite
+            - IfcProjectedCRS
+            - IfcMapConversion
+            - IfcGeographicElement
+        La geometría se construye en coordenadas locales y la posición real
+        se conserva mediante georreferenciación IFC.
+    Entradas:
+        refcat (str): referencia catastral (se usa base 14)
+        srs (str): "AUTO" o EPSG/URN para pedir el GML base
+        out_dir (str): carpeta destino dentro de EXPORT_ROOT
+        basename (str): nombre base sin extensión (si vacío usa ref14)
+        overwrite (bool): sobrescribir si existe
+    Salida:
+        dict: ruta del IFC y metadatos de exportación
+    """
+    if not _HAS_IFCOPENSHELL:
+        return {
+            "ok": False,
+            "note": "ifcopenshell no está disponible en el entorno.",
+        }
+
+    ref14 = (refcat or "").strip().upper()[:14]
+    if not ref14:
+        return {
+            "ok": False,
+            "note": "RC vacía",
+        }
+
+    base = (basename or ref14).strip() or ref14
+
+    # 1) Obtener GML de parcela
+    pack_gml = _parcela_gml_por_rc_impl(ref14, srs)
+    if not pack_gml.get("ok"):
+        return {
+            "ok": False,
+            "used_refcat": ref14,
+            "note": pack_gml.get("note", "Error al obtener GML"),
+        }
+
+    gml_text = pack_gml.get("gml") or ""
+    if not gml_text:
+        return {
+            "ok": False,
+            "used_refcat": ref14,
+            "note": "GML vacío",
+        }
+
+    # 2) Extraer polígonos
+    polygons = _gml_extract_polygons(gml_text)
+    if not polygons:
+        return {
+            "ok": False,
+            "used_refcat": ref14,
+            "note": "No se encontraron polígonos válidos en el GML.",
+        }
+
+    # 3) Detectar EPSG / CRS
+    srs_name = pack_gml.get("response_srsName") or _gml_first_srs_name(gml_text) or ""
+    epsg_code = _epsg_from_any_srs(pack_gml.get("resolved_srs") or "") or _epsg_from_srs_name(srs_name)
+
+    # 4) Calcular origen local
+    try:
+        x0, y0 = _local_origin_from_polygons(polygons)
+    except Exception as e:
+        return {
+            "ok": False,
+            "used_refcat": ref14,
+            "note": f"No se pudo calcular el origen local: {e}",
+        }
+
+    # 5) Construir IFC
+    try:
+        ifc_file, metadata = _build_ifc_parcel_surface_model(
+            polygons=polygons,
+            ref14=ref14,
+            epsg_code=epsg_code,
+            map_eastings=x0,
+            map_northings=y0,
+        )
+    except Exception as e:
+        return {
+            "ok": False,
+            "used_refcat": ref14,
+            "note": f"Error al construir el IFC: {e}",
+        }
+
+    # 6) Guardar archivo
+    try:
+        ifc_path = _safe_export_path(f"{base}.ifc", out_dir=out_dir)
+        ifc_bytes = _write_ifc(ifc_path, ifc_file, overwrite=overwrite)
+    except Exception as e:
+        return {
+            "ok": False,
+            "used_refcat": ref14,
+            "note": f"Error al escribir el IFC: {e}",
+        }
+
+    # 7) Respuesta
+    return {
+        "ok": True,
+        "used_refcat": ref14,
+        "ifc": {
+            "path": ifc_path,
+            "bytes": ifc_bytes,
+            "requested_srs": srs,
+            "resolved_srs": pack_gml.get("resolved_srs"),
+            "response_srsName": srs_name or None,
+            "schema": "IFC4",
+            "epsg": metadata.get("epsg"),
+            "map_origin": metadata.get("map_origin"),
+            "local_bbox": metadata.get("local_bbox"),
+            "rings": metadata.get("rings"),
+            "points": metadata.get("points"),
+            "faces": metadata.get("faces"),
+            "area_m2": metadata.get("area_m2"),
+            "perimeter_m": metadata.get("perimeter_m"),
+        },
+        "note": "IFC de parcela exportado correctamente desde el servidor MCP.",
+    }

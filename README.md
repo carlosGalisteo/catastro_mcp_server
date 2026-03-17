@@ -1,6 +1,7 @@
 # catastro_mcp_server
 ## Descripción general
 Servidor MCP (Model Context Protocol) en Python que expone herramientas para consultar servicios oficiales del Catastro de España y obtener información catastral no protegida de forma estructurada.
+Además permite la exportación de la geometría de la parcela en formatos GML, GeoJSON e IFC.
 
 El servidor integra dos familias de servicios:
 
@@ -114,6 +115,36 @@ El servidor ofrece las siguientes herramientas:
     - <small>Input:</small>
         - <small>refcat (str): RC (14/18/20). Se usa la base de 14.</small>
         - <small>srs (str): se mantiene por compatibilidad, pero esta tool fuerza EPSG:4326 internamente.</small>
+
+- `exportar_parcela_gml_y_geojson`
+    - <small>Exporta GML + GeoJSON de una parcela en una sola llamada.
+        - GML: se pide con srs (AUTO o el que indiques)
+        - GeoJSON: siempre se entrega en lon/lat (WGS84). Si pyproj no está, fuerza GML en EPSG:4326.</small>
+    - <small>Input:</small>
+        - <small>refcat (str): RC (se usa base 14).</small>
+        - <small>srs (str): "AUTO" o EPSG/URN para el GML.</small>
+        - <small>out_dir (str): carpeta destino (debe estar dentro de EXPORT_ROOT).</small>
+        - <small>basename (str): nombre base sin extensión (si vacío usa ref14).</small>
+        - <small>overwrite (bool): sobrescribir si existe.</small>
+
+- `exportar_parcela_ifc`
+    - <small>Exporta una parcela catastral a IFC4 como superficie plana cerrada.
+        El IFC generado incluye una estructura mínima válida para uso en
+        entornos BIM como Bonsai:
+            - IfcProject
+            - IfcSite
+            - IfcProjectedCRS
+            - IfcMapConversion
+            - IfcGeographicElement
+        La geometría se construye en coordenadas locales y la posición real
+        se conserva mediante georreferenciación IFC.</small>
+    - <small>Input:</small>
+        - <small>refcat (str): referencia catastral (se usa base 14)</small>
+        - <small>srs (str): "AUTO" o EPSG/URN para pedir el GML base</small>
+        - <small>out_dir (str): carpeta destino dentro de EXPORT_ROOT</small>
+        - <small>basename (str): nombre base sin extensión (si vacío usa ref14)</small>
+        - <small>overwrite (bool): sobrescribir si existe</small>
+
 
 ## Requisitos
 - Tener instalado `uv` (incluye `uvx`).
