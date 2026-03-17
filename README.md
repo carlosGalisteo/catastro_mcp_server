@@ -165,7 +165,7 @@ Si `uv/uvx` está en el PATH del sistema, usa:
   "command": "uvx",
   "args": [
     "--from",
-    "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.2.zip",
+    "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.3.zip",
     "catastro_mcp_server"
   ]
 }
@@ -177,7 +177,7 @@ Si Claude no encuentra `uvx`, obtén la ruta con where uvx y úsala como command
   "command": "C:\\Users\\TU_USUARIO\\.local\\bin\\uvx.exe",
   "args": [
     "--from",
-    "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.2.zip",
+    "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.3.zip",
     "catastro_mcp_server"
   ]
 }
@@ -201,7 +201,7 @@ Una vez activo el servidor en Claude Desktop, prueba con estas consultas:
 Ejecuta en una consola (no es necesario clonar el repositorio; puedes hacerlo desde cualquier carpeta):
 
 ```bash
-npx -y @modelcontextprotocol/inspector uvx --from "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.1.zip" catastro_mcp_server
+npx -y @modelcontextprotocol/inspector uvx --from "catastro_mcp_server @ https://github.com/carlosGalisteo/catastro_mcp_server/archive/refs/tags/v0.1.3.zip" catastro_mcp_server
 ```
 ## Solución de problemas (Troubleshooting)
 - **No aparecen las herramientas en Claude Desktop**
